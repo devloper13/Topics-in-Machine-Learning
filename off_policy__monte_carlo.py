@@ -5,51 +5,44 @@ import json
 from gym_tictactoe.env import TicTacToeEnv, agent_by_mark, next_mark,\
      after_action_state, check_game_status, O_REWARD, X_REWARD
 
-#from human_agent import HumanAgent
 from base_agent import BaseAgent
-from td_agent import TDAgent
-
-MAX_EPISODE = 20000
+MAX_EPISODE = 600000
 EPSILON = 0.5
-MC_MODEL_FILE = 'best_mconp_agent.dat'
+MC_MODEL_FILE = 'best_mcoffp_agent.dat'
 
 Q_Table = {}
+ppolicy = {}
 
-class OnPolicyMCAgent(object):
+class OffPolicyMCAgent(object):
     def __init__(self, mark, epsilon, test=0):
         self.mark = mark
         self.epsilon = epsilon
         self.trans_list = []
         self.test = test
-        self.state_count = {}
-        self.epolicy = {}
+        self.C = {}
+        self.bpolicy = {}
         self.total_actions = 9
         self.orig_actions = []
+        self.gamma = 1
 
     def act(self,state,ava_actions):
-        #state = state[0]
         prob_list = []
         prob_sum = 0
         if state not in Q_Table:
-            #print('Bye')
             return np.random.choice(ava_actions)
 
-        #returning actions while testing
         if self.test == 1:
             #print('Hi')
-            if self.mark == 'O':
-                return np.argmax(Q_Table[state])
-            else:
-                return np.argmin(Q_Table[state])
+            return ppolicy[state]
 
         for action in ava_actions:
-            prob_list.append(self.epolicy[state][action])
-            prob_sum+=self.epolicy[state][action]
+            prob_list.append(self.bpolicy[state][action])
+            prob_sum+=self.bpolicy[state][action]
 
         for action in range(len(prob_list)):
             prob_list[action] += (1-prob_sum)/len(prob_list)
 
-        action = action = np.random.choice(ava_actions,p=prob_list)
+        action = np.random.choice(ava_actions,p=prob_list)
 
         return action
 
@@ -58,28 +51,41 @@ class OnPolicyMCAgent(object):
             a_star = np.argmax(Q_Table[state])
         else:
             a_star = np.argmin(Q_Table[state])
+
         for action in range(self.total_actions):
-            self.epolicy[state] = [self.epsilon/self.total_actions]*\
+            self.bpolicy[state] = [self.epsilon/self.total_actions]*\
                                                         self.total_actions
-        self.epolicy[state][a_star] += 1-self.epsilon
+        self.bpolicy[state][a_star] += 1-self.epsilon
 
     def update(self):
         trans_size = len(self.trans_list)-1
         return_val = 0
+        W = 1
         for transition in range(trans_size,-1,-1):
             state,action,reward = self.trans_list[transition]
-            #state = state[0]
             if state not in Q_Table:
                 Q_Table[state] = [0]*self.total_actions
-            if (state,action) not in self.state_count:
-                self.state_count[(state,action)] = 1
-            else:
-                self.state_count[(state,action)] += 1
-            return_val= return_val + reward
+                self.bpolicy[state] = [1/self.total_actions]*self.total_actions
+                #self.update_policy(state)
+
+            if (state,action) not in self.C:
+                self.C[(state,action)] = 0
+            self.C[(state,action)] += W
+
+            return_val= self.gamma * return_val + reward
 
             diff = return_val - Q_Table[state][action]
-            Q_Table[state][action] +=  diff/self.state_count[(state,action)]
-            self.update_policy(state)
+            Q_Table[state][action] +=  diff * (W/self.C[(state,action)])
+
+            if self.mark == 'O':
+                ppolicy[state] = np.argmax(Q_Table[state])
+            else:
+                ppolicy[state] = np.argmin(Q_Table[state])
+
+            if action != ppolicy[state]:
+                break
+
+            W = W*(1/self.bpolicy[state][action])
 
 
 def save_model(save_file):
@@ -88,9 +94,9 @@ def save_model(save_file):
         info = dict(type="MC")
         # write state values
         f.write('{}\n'.format(json.dumps(info)))
-        for state, value in Q_Table.items():
+        for state, value in ppolicy.items():
             #print(state,value)
-            f.write('{}\t{}\n'.format(state, str(value)))
+            f.write('{}\t{}\n'.format(state, value))
 
 
 def load_model(filename):
@@ -101,14 +107,14 @@ def load_model(filename):
             elms = line.decode('ascii').split('\t')
             state = eval(elms[0])
             val = eval(elms[1])
-            Q_Table[state] = val
+            ppolicy[state] = val
     return info
 
 def learn(env):
     max_episode = MAX_EPISODE
     epsilon = EPSILON
-    agents = [OnPolicyMCAgent('X', epsilon),
-              OnPolicyMCAgent('O', epsilon)]
+    agents = [OffPolicyMCAgent('O', epsilon),
+              OffPolicyMCAgent('X', epsilon)]
     agents[0].orig_actions = env.available_actions()
     agents[1].orig_actions = env.available_actions()
 
@@ -130,7 +136,6 @@ def learn(env):
             env.show_turn(False,mark)
             action = agent.act(state,ava_actions)
             next_state, reward, done, _ = env.step(action)
-            #agent.update(state, new_state)
             agent.trans_list.append((state,action,reward))
 
             state = next_state
@@ -144,16 +149,16 @@ def learn(env):
             env.show_result(False,mark,reward)
 
         start_mark = next_mark(start_mark)
-
     save_model(MC_MODEL_FILE)
 
 def play_base(env):
     load_model(MC_MODEL_FILE)
     agents = [BaseAgent('O'),
-              OnPolicyMCAgent('X', 0, 1)]
+              OffPolicyMCAgent('X', 0, 1)]
 
-    start_mark = 'X'
-    test_cases = 10
+    start_mark = 'O'
+    test_cases = 1000
+    win1, win2 = 0,0
     while test_cases:
         env.set_start_mark(start_mark)
         state = env.reset()
@@ -167,15 +172,19 @@ def play_base(env):
             next_state, reward, done, _ = env.step(action)
             state = next_state
             if done:
-                env.show_result(True, mark, reward)
+                #env.show_result(True, mark, reward)
+                if reward != 0 and mark == agents[0].mark:
+                    win1 += 1
+                elif reward != 0 and mark == agents[1].mark:
+                    win2 += 1
                 break
             else:
                 _, mark = state
 
-        # rotation start
-        start_mark = next_mark(start_mark)
+        # rotation s tart
+        #start_mark = next_mark(start_mark)
         test_cases-=1
-
+    print(agents[0].mark, win1, agents[1].mark, win2)
 
 if __name__ == '__main__':
     env = TicTacToeEnv()
